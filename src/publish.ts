@@ -16,8 +16,8 @@
  * No chain/gateway logic is reimplemented here — it is all imported from
  * pfc-connector-gateway-proof (v0.3.0).
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import {
   AGENT_A,
@@ -37,7 +37,8 @@ import type {
   ToolScope,
 } from "pfc-connector-gateway-proof";
 
-import { renderPage } from "./site.ts";
+import { renderPage, renderTranslatedPage } from "./site.ts";
+import { backTranslationCheck, StubTranslator, type Translator } from "./translate.ts";
 import type { ContentUnit } from "./types.ts";
 
 const SITE_CONNECTOR = "site";
@@ -107,10 +108,19 @@ export class SitePublishAdapter implements ConnectorAdapter {
     if (operation !== "publish") {
       throw new Error(`SitePublishAdapter: unsupported operation ${operation}`);
     }
-    const { unit } = payload as { unit: ContentUnit };
-    const html = renderPage(unit);
+    const { unit, lang, translatedBody } = payload as {
+      unit: ContentUnit;
+      lang?: string;
+      translatedBody?: string;
+    };
+    const html =
+      lang !== undefined && translatedBody !== undefined
+        ? renderTranslatedPage(unit, lang, translatedBody)
+        : renderPage(unit);
     mkdirSync(this.#outDir, { recursive: true });
-    const path = join(this.#outDir, `${this.tool}.html`);
+    // tool "matthew-5" -> "matthew-5.html"; "matthew-5:es" -> "matthew-5.es.html".
+    const fileName = `${this.tool.replace(/:/g, ".")}.html`;
+    const path = join(this.#outDir, fileName);
     writeFileSync(path, html, "utf8"); // <-- only gated, gateway-invoked write
     return { slug: this.tool, path, bytes: Buffer.byteLength(html, "utf8") };
   }
@@ -152,6 +162,9 @@ export function authorizeSitePublish(env: Env, slug: string): DelegationToken {
 export interface PublishQueuePaths {
   publishPath: string;
   quarantinePath: string;
+  /** Where back-translation gate failures are recorded. Defaults to
+   *  translation-quarantine.jsonl beside quarantinePath. */
+  translationQuarantinePath?: string;
 }
 
 export type PublishOutcome =
@@ -230,4 +243,170 @@ export async function publishPage(
 
   const result = outcome.result as SitePublishResult;
   return { published: true, slug, path: result.path, execution: outcome };
+}
+
+// ===========================================================================
+// Step 3 — translated pages: each language is its own gated publish.
+// ===========================================================================
+
+/** Gateway target / action strings for a language version of a slug. */
+export function siteLangTarget(slug: string, lang: string): string {
+  return `${SITE_CONNECTOR}:${slug}:${lang}`;
+}
+export function publishLangAction(slug: string, lang: string): string {
+  // callAction === `${tool}.${operation}`, tool === `${slug}:${lang}`.
+  return `${slug}:${lang}.publish`;
+}
+
+/**
+ * Authorize publishing one or more language versions of a slug. The chain
+ * authorizes exactly those `site:<slug>:<lang>` targets and their publish
+ * actions — nothing else.
+ */
+export function authorizeTranslatedPublish(
+  env: Env,
+  slug: string,
+  langs: string[],
+): DelegationToken {
+  const scope: ToolScope = {
+    permittedTargets: langs.map((l) => siteLangTarget(slug, l)),
+    permittedActions: langs.map((l) => publishLangAction(slug, l)),
+  };
+  const receipt = issueHumanAuthReceipt({
+    governanceKey: env.keys.governance,
+    grantedBy: "human:dan@example.com",
+    authorizedAgent: AGENT_A,
+    scope,
+    usagePolicy: "MULTI_USE",
+    maxUses: 100,
+    ttlMs: 3_600_000,
+    cfg: env.cfg,
+  });
+  return issueDelegationToken({
+    issuerAgentId: AGENT_A,
+    issuerKey: env.keys.agentA,
+    delegateeAgentId: AGENT_B,
+    delegateeKeyId: env.keys.agentB.keyId,
+    parent: receipt,
+    scope,
+    freshnessBound: FRESHNESS_DEFAULTS.MEDIUM,
+    ttlMs: 600_000,
+    cfg: env.cfg,
+  });
+}
+
+export interface TranslationQuarantineRecord {
+  unit_id: string;
+  lang: string;
+  score: number;
+  threshold: number;
+  reason: "BACK_TRANSLATION_BELOW_THRESHOLD";
+  quarantinedAt: string;
+}
+
+export type TranslatedPublishOutcome =
+  | { published: true; lang: string; slug: string; path: string; execution: GatewayExecution }
+  | {
+      published: false;
+      lang: string;
+      slug: string;
+      reason: "BACK_TRANSLATION_BELOW_THRESHOLD";
+      score: number;
+      threshold: number;
+    }
+  | {
+      published: false;
+      lang: string;
+      slug: string;
+      reason: "GATEWAY_REFUSAL";
+      refusal: GatewayRefusal;
+      errorCodes: ChainVerificationErrorCode[];
+    };
+
+function translationQuarantinePathFor(paths: PublishQueuePaths): string {
+  return (
+    paths.translationQuarantinePath ??
+    join(dirname(paths.quarantinePath), "translation-quarantine.jsonl")
+  );
+}
+
+/**
+ * Publish a translated language version of a verified unit — still a gated
+ * publish. The flow:
+ *   1. Same pre-checks as Step 2: quarantined units are refused before the
+ *      gateway; only publish-queue units are eligible.
+ *   2. Translate en->lang and run the back-translation quality gate. Below
+ *      QUALITY_THRESHOLD -> append a translation-quarantine record and write
+ *      NOTHING (honest gap over bad coverage); the gateway is never called.
+ *   3. On gate pass, ask the gateway to execute `publish` on
+ *      `site:<slug>:<lang>` with `chain`. Refusal -> fail closed, no file.
+ *      Execution -> the adapter has written dist/site/<slug>.<lang>.html.
+ */
+export async function publishTranslatedPage(
+  unit: ContentUnit,
+  lang: string,
+  env: Env,
+  chain: DelegationToken,
+  paths: PublishQueuePaths,
+  translator: Translator = new StubTranslator(),
+): Promise<TranslatedPublishOutcome> {
+  const slug = slugForUnit(unit);
+
+  // 1. Same admission rules as the English publish path.
+  if (unitIdsIn(paths.quarantinePath).has(unit.unit_id)) {
+    throw new QuarantinedUnitRejected(unit.unit_id);
+  }
+  if (!unitIdsIn(paths.publishPath).has(unit.unit_id)) {
+    throw new UnitNotInPublishQueue(unit.unit_id);
+  }
+
+  // 2. Back-translation quality gate — fail closed into translation quarantine.
+  const check = backTranslationCheck(translator, unit.body, lang);
+  if (!check.pass) {
+    const record: TranslationQuarantineRecord = {
+      unit_id: unit.unit_id,
+      lang,
+      score: check.score,
+      threshold: check.threshold,
+      reason: "BACK_TRANSLATION_BELOW_THRESHOLD",
+      quarantinedAt: new Date().toISOString(),
+    };
+    const qPath = translationQuarantinePathFor(paths);
+    mkdirSync(dirname(qPath), { recursive: true });
+    appendFileSync(qPath, JSON.stringify(record) + "\n", "utf8");
+    console.error(
+      `[witness] translation BELOW THRESHOLD ${siteLangTarget(slug, lang)}: ` +
+        `score=${check.score.toFixed(3)} < ${check.threshold} -> quarantined, no publish`,
+    );
+    return {
+      published: false,
+      lang,
+      slug,
+      reason: "BACK_TRANSLATION_BELOW_THRESHOLD",
+      score: check.score,
+      threshold: check.threshold,
+    };
+  }
+
+  // 3. Gated publish of the language version.
+  const call: ConnectorCall = {
+    connector: SITE_CONNECTOR,
+    tool: `${slug}:${lang}`,
+    operation: "publish",
+    payload: { unit, lang, translatedBody: check.target },
+  };
+  const outcome = await env.gateway.execute(chain, call, `publish:${lang}`);
+
+  if (!outcome.ok) {
+    const errorCodes = outcome.verification.errors.map((e) => e.code);
+    console.error(
+      `[witness] translated publish BLOCKED ${siteLangTarget(slug, lang)} ` +
+        `(${publishLangAction(slug, lang)}): [${errorCodes.join(", ")}] ` +
+        `boundary=${outcome.boundaryReceipt.receiptId} status=${outcome.boundaryReceipt.status}`,
+    );
+    return { published: false, lang, slug, reason: "GATEWAY_REFUSAL", refusal: outcome, errorCodes };
+  }
+
+  const result = outcome.result as SitePublishResult;
+  return { published: true, lang, slug, path: result.path, execution: outcome };
 }
