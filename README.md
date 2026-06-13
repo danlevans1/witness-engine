@@ -32,6 +32,45 @@ The gate. \`verifyUnit\` does **not** trust the hash a unit claims. It re-reads 
 
 Each guarantee is falsifiable and proven: a valid unit publishes; a fabricated citation quarantines; a tampered canon entry quarantines; a zero-reference unit quarantines. Plus seeded-canon integrity and the dependency-import smoke test. 6/6 passing.
 
+## How step 2 works
+
+Step 2 adds the first real external effect — publishing a page — and gates it
+through the imported PFC gateway. witness-engine never writes a page directly;
+it asks the gateway, and the gateway decides.
+
+### Publishing modeled as a connector (`src/publish.ts`)
+
+A page publish is a PFC `ConnectorCall`: action `publish`, target `site:<slug>`.
+`publishPage` rejects any quarantined unit before the gateway is even called,
+pulls only from the publish queue, then calls `ConnectorGateway.execute()` with
+the delegation chain authorizing that exact action and target.
+
+The page is written by `SitePublishAdapter` — and that adapter is the *only*
+writer to `dist/site/`. It fires solely as the gateway's effect after a passing
+pre-effect check. If the chain is missing, revoked, expired, or out of scope,
+the gateway returns a refusal, the BoundaryReceipt status is `BLOCKED`, and
+nothing is written. On success the gateway issues a `PRE_EFFECT` BoundaryReceipt,
+runs the adapter, and emits an `ExecutionResultReceipt`.
+
+The consequence: witness-engine *cannot* publish on its own authority. The
+governance is enforced by infrastructure it imports, not by code it could
+quietly weaken — the same credential-starvation logic PFC applies to API
+calls, here applied to a file write.
+
+### Falsifiable gating (`test/publish.test.ts`)
+
+The point of Step 2 is that fail-closed is observable, not asserted:
+
+- authorized chain → page written, `GatewayExecution`, `ExecutionResultReceipt` emitted
+- revoked token → `TOKEN_REVOKED`, **no file on disk**
+- out-of-scope target (chain authorizes `site:foo`, publish attempts `site:bar`) → refused, **no file**
+- quarantined unit → rejected before the gateway is called, **no file**
+
+The blocked cases assert file *absence* on disk (`existsSync === false`), not
+just a return value. Clone the repo, revoke the token, run the tests, and watch
+no page appear — that is the PFC-in-production claim, checkable by a stranger.
+6/6 Step 1 tests stay green; 10/10 total.
+
 ## Why this can run autonomously
 
 An autonomous publishing system without governance is the well-known account-ban / spam / misinformation failure mode. witness-engine avoids it by construction rather than by policy:
@@ -45,8 +84,8 @@ The result is a system whose autonomy is *earned*: it does only what its delegat
 
 ## Roadmap
 
-- **Step 1 — Canon Store + verification gate.** Done (this release).
-- **Step 2 — Static-site publisher.** First publish action gated by a gateway BoundaryReceipt; English only; proves the receipt-gated publish path end to end.
+- **Step 1 — Canon Store + verification gate.** Done.
+- **Step 2 — Static-site publisher.** Done. Publish action gated by a gateway BoundaryReceipt; English only; receipt-gated publish path proven end to end.
 - **Step 3 — Translation, Tier 1.** ~5 languages with back-translation QA; honest coverage gaps over bad translations.
 - **Step 4 — Witness Ledger.** Coverage measured against people-group data; "published in language X" reported separately from "engagement evidence from group Y."
 
@@ -54,6 +93,33 @@ The result is a system whose autonomy is *earned*: it does only what its delegat
 
 - Roughly 2.6 billion people lack internet access, concentrated in the least-reached regions, so "entirely automated on the internet" asymptotically approaches but cannot complete the task.
 - Whether automated proclamation constitutes *witness* (martys — personal testimony) or seed-scattering is a real theological question. The architecture hedges by making every published page an on-ramp to human contact and community, not the endpoint.
+
+## Setup
+
+```sh
+npm install
+npm test    # 10/10
+```
+
+witness-engine depends on
+[pfc-connector-gateway-proof](https://github.com/danlevans1/pfc-connector-gateway-proof)
+pinned to a git tag. **npm aggressively caches git dependencies**, so after the
+gateway publishes a new tag a plain `npm install` may silently keep an older
+build — symptoms are an unexpected `"version"` in
+`node_modules/pfc-connector-gateway-proof/package.json` or import errors for
+exports that exist on the tag (e.g. a missing `AGENT_A`). Force a clean fetch:
+
+```sh
+npm cache clean --force
+rm -rf node_modules package-lock.json
+npm install
+```
+
+Verify you got the intended build:
+
+```sh
+grep '"version"' node_modules/pfc-connector-gateway-proof/package.json
+```
 
 ## Stack
 
