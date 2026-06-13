@@ -71,7 +71,7 @@ const ONRAMP_FOOTER =
   `      <p>This page is a starting point, not the end. If these words speak to you, ` +
   `you do not have to walk it alone &mdash; ask questions, and find people near you.</p>\n` +
   `      <ul>\n` +
-  `        <li>Talk with someone: write to <a href="mailto:hello@witness.example">hello@witness.example</a>.</li>\n` +
+  `        <li>Talk with someone: write to <a href="mailto:danlevans1@yahoo.com">danlevans1@yahoo.com</a>.</li>\n` +
   `        <li>Find a local community of people exploring the same questions.</li>\n` +
   `        <li>Keep reading the source text for yourself.</li>\n` +
   `      </ul>\n` +
