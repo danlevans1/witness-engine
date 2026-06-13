@@ -1,0 +1,22 @@
+{
+  "name": "witness-engine",
+  "version": "0.1.0",
+  "description": "Witness Engine — canon-grounded content pipeline. Step 1: content-addressed Canon Store (WEB scripture), Content Engine scaffold, fail-closed citation verification with quarantine.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "seed": "node scripts/seed-canon.ts",
+    "test": "node --test test/witness.test.ts"
+  },
+  "dependencies": {
+    "pfc-connector-gateway-proof": "git+https://github.com/danlevans1/pfc-connector-gateway-proof.git#v0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "world-english-bible": "^1.0.1"
+  }
+}

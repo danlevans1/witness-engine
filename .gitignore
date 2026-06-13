@@ -1,0 +1,10 @@
+# Pipeline runtime output — publish queue and quarantine are runtime
+# artifacts; tests write theirs to the OS tmpdir. The seeded canon
+# (data/canon.jsonl) IS committed: it is the content-addressed ground truth.
+data/publish.jsonl
+data/quarantine.jsonl
+
+# Tooling / OS noise
+node_modules/
+.DS_Store
+*.log
