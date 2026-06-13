@@ -96,6 +96,11 @@ translation, and it records exactly how far below the bar it fell. This is the
 data the witness ledger later reads to report a gap truthfully rather than
 showing false coverage.
 
+The threshold is empirically grounded: on WEB scripture, faithful Tier 1
+translations (Spanish/French/Portuguese) back-translate at 0.99+ similarity
+while gross failures score near zero, so `QUALITY_THRESHOLD = 0.7` sits in the
+empty middle — passing good translations, catching broken ones.
+
 Falsifiable: a mangled translation produces no file and a scored quarantine
 entry; an unauthorized-language attempt is refused at the gateway with no file.
 

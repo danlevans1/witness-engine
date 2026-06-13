@@ -79,6 +79,14 @@ export class StubTranslator implements Translator {
 // --- Back-translation quality gate ------------------------------------------
 
 /** Moderate quality bar: a clean round-trip scores 1.0; corruption ~0. */
+// Back-translation similarity floor for publishing a translation.
+// Empirically grounded (not arbitrary): on WEB scripture, good Tier 1
+// translations (es/fr/pt) round-trip at 0.99+ via Jaccard token overlap,
+// while gross failures score ~0. 0.7 sits in the wide empty middle — it
+// passes faithful translations and catches gross failures. It does NOT yet
+// probe near-miss detection (plausible-but-subtly-wrong), because Tier 1
+// round-trips don't land near it. Revisit when Tier 2/3 languages produce
+// mid-band scores that actually exercise the threshold.
 export const QUALITY_THRESHOLD = 0.7;
 
 /** Normalize for comparison: NFC, lowercased, punctuation-stripped tokens. */
