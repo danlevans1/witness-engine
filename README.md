@@ -71,6 +71,61 @@ just a return value. Clone the repo, revoke the token, run the tests, and watch
 no page appear — that is the PFC-in-production claim, checkable by a stranger.
 6/6 Step 1 tests stay green; 10/10 total.
 
+## How step 3 works
+
+Step 3 adds translation — and treats every translated page as its own gated
+publish, so translation cannot bypass the Step 2 boundary.
+
+### Each language is separately authorized (`src/translate.ts`, `src/publish.ts`)
+
+A translated page is a distinct `ConnectorCall`: action `publish`, target
+`site:<slug>:<lang>` (e.g. `site:matthew-5-9:es`). The delegation chain must
+authorize that exact language; a chain that permits Spanish cannot publish
+French. Tier 1 is Spanish, French, and Portuguese, behind a `Translator`
+interface (`StubTranslator` by default, a real engine swappable in without
+touching the gate).
+
+### Honest gaps over bad coverage
+
+Before publishing, each translation passes a back-translation quality gate:
+translate forward, translate the result back to English, score the similarity
+against the source. Below `QUALITY_THRESHOLD`, the translation does not publish —
+it is recorded in `translation-quarantine.jsonl` with its numeric score and
+reason. The system would rather publish nothing in a language than publish a bad
+translation, and it records exactly how far below the bar it fell. This is the
+data the witness ledger later reads to report a gap truthfully rather than
+showing false coverage.
+
+Falsifiable: a mangled translation produces no file and a scored quarantine
+entry; an unauthorized-language attempt is refused at the gateway with no file.
+
+## How step 4 works
+
+Step 4 is the Witness Ledger — the "for a witness" measurement. It adds no new
+gated effects; it reads the records the pipeline already produces and reports
+honestly.
+
+### Coverage as a report, not a claim of reach (`src/ledger.ts`)
+
+`buildCoverageReport` is a pure function that joins the publication receipts
+(proof of what actually published, derived from ExecutionResultReceipts — not
+from files on disk), the content quarantine, and the translation quarantine into
+a per-unit, per-language coverage map with rollups. Gaps are typed:
+`NOT_ATTEMPTED` (no record at all) versus `BELOW_THRESHOLD` (in the translation
+quarantine, carrying its score).
+
+### Two claims kept separate
+
+"Published in language X" and "engagement evidence from people-group Y" are
+different claims and are never conflated. v0.1 has only publication data, so the
+report shows published status with explicit reached/gap per language, and leaves
+a visibly-empty "Engagement (not yet measured)" section — typed so it cannot be
+backfilled from publication data. A quarantined unit never counts as published.
+
+The dashboard (`dist/site/_coverage.html`) is a report *about* the system — an
+operator artifact, not gospel content — so it is written directly, not through
+the gateway. Gospel pages remain writable only by the gateway's adapter.
+
 ## Why this can run autonomously
 
 An autonomous publishing system without governance is the well-known account-ban / spam / misinformation failure mode. witness-engine avoids it by construction rather than by policy:
@@ -86,8 +141,8 @@ The result is a system whose autonomy is *earned*: it does only what its delegat
 
 - **Step 1 — Canon Store + verification gate.** Done.
 - **Step 2 — Static-site publisher.** Done. Publish action gated by a gateway BoundaryReceipt; English only; receipt-gated publish path proven end to end.
-- **Step 3 — Translation, Tier 1.** ~5 languages with back-translation QA; honest coverage gaps over bad translations.
-- **Step 4 — Witness Ledger.** Coverage measured against people-group data; "published in language X" reported separately from "engagement evidence from group Y."
+- **Step 3 — Translation, Tier 1.** Done. Spanish/French/Portuguese; each language separately authorized; back-translation quality gate records honest gaps over bad coverage.
+- **Step 4 — Witness Ledger.** Done. Honest coverage report; "published in language X" kept separate from "engagement evidence from group Y" (engagement not yet measured).
 
 ## Honest limitations
 
