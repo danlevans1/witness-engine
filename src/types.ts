@@ -63,3 +63,17 @@ export interface PublishRecord {
   unit: ContentUnit;
   verifiedAt: string; // ISO 8601 UTC
 }
+
+/**
+ * Publication record — proof that a page actually published, derived from the
+ * gateway's ExecutionResultReceipt (NOT from the rendered file). One record per
+ * successful language version. This is the source of truth the Witness Ledger
+ * reads for "published in language X".
+ */
+export interface PublicationRecord {
+  unit_id: string;
+  lang: string; // BCP-47; "en" for the English page
+  target: string; // gateway target, e.g. "site:matthew-5:es"
+  receiptId: string; // ExecutionResultReceipt id
+  publishedAt: string; // ISO 8601 UTC
+}

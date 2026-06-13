@@ -39,7 +39,7 @@ import type {
 
 import { renderPage, renderTranslatedPage } from "./site.ts";
 import { backTranslationCheck, StubTranslator, type Translator } from "./translate.ts";
-import type { ContentUnit } from "./types.ts";
+import type { ContentUnit, PublicationRecord } from "./types.ts";
 
 const SITE_CONNECTOR = "site";
 
@@ -165,6 +165,20 @@ export interface PublishQueuePaths {
   /** Where back-translation gate failures are recorded. Defaults to
    *  translation-quarantine.jsonl beside quarantinePath. */
   translationQuarantinePath?: string;
+  /** Where successful publishes are recorded (one per language version),
+   *  derived from the gateway's ExecutionResultReceipt. Read by the Witness
+   *  Ledger (Step 4). When unset, no publication record is written. */
+  publicationsPath?: string;
+}
+
+/** Append a publication record (proof-of-publish) when a publications path is set. */
+function recordPublication(
+  paths: PublishQueuePaths,
+  rec: PublicationRecord,
+): void {
+  if (paths.publicationsPath === undefined) return;
+  mkdirSync(dirname(paths.publicationsPath), { recursive: true });
+  appendFileSync(paths.publicationsPath, JSON.stringify(rec) + "\n", "utf8");
 }
 
 export type PublishOutcome =
@@ -242,6 +256,13 @@ export async function publishPage(
   }
 
   const result = outcome.result as SitePublishResult;
+  recordPublication(paths, {
+    unit_id: unit.unit_id,
+    lang: "en",
+    target: siteTarget(slug),
+    receiptId: outcome.executionResultReceipt.receiptId,
+    publishedAt: new Date().toISOString(),
+  });
   return { published: true, slug, path: result.path, execution: outcome };
 }
 
@@ -408,5 +429,12 @@ export async function publishTranslatedPage(
   }
 
   const result = outcome.result as SitePublishResult;
+  recordPublication(paths, {
+    unit_id: unit.unit_id,
+    lang,
+    target: siteLangTarget(slug, lang),
+    receiptId: outcome.executionResultReceipt.receiptId,
+    publishedAt: new Date().toISOString(),
+  });
   return { published: true, lang, slug, path: result.path, execution: outcome };
 }
