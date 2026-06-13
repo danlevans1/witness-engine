@@ -38,6 +38,7 @@ import type {
 } from "pfc-connector-gateway-proof";
 
 import { renderPage, renderTranslatedPage } from "./site.ts";
+import { requireApproval } from "./review.ts";
 import { backTranslationCheck, StubTranslator, type Translator } from "./translate.ts";
 import type { ContentUnit, PublicationRecord } from "./types.ts";
 
@@ -169,6 +170,27 @@ export interface PublishQueuePaths {
    *  derived from the gateway's ExecutionResultReceipt. Read by the Witness
    *  Ledger (Step 4). When unset, no publication record is written. */
   publicationsPath?: string;
+  /** Append-only human-review receipts. When set, the human-review gate is
+   *  enforced: a unit must have a valid matching APPROVED receipt or the
+   *  publish is blocked (fail-closed) BEFORE the gateway is reached. The
+   *  operator pipeline always sets this, so the human gate is unavoidable. */
+  reviewReceiptsPath?: string;
+  /** Review queue (pending submissions); written by the submit phase. */
+  reviewQueuePath?: string;
+  /** DOCTRINE.md path, recorded as doctrine_version on review receipts. */
+  doctrinePath?: string;
+}
+
+/**
+ * Fail-closed human-review gate: when review receipts are configured, the unit
+ * must carry a valid matching APPROVED receipt or this throws ReviewBlocked
+ * (REVIEW_REQUIRED / REVIEW_REJECTED / REVIEW_STALE) — before the gateway is
+ * ever reached and before any file is written. Sits alongside the quarantine
+ * check, which also throws.
+ */
+function enforceReviewGate(unit: ContentUnit, paths: PublishQueuePaths): void {
+  if (paths.reviewReceiptsPath === undefined) return; // review not configured here
+  requireApproval(unit, { reviewReceiptsPath: paths.reviewReceiptsPath });
 }
 
 /** Append a publication record (proof-of-publish) when a publications path is set. */
@@ -232,6 +254,8 @@ export async function publishPage(
   if (!unitIdsIn(paths.publishPath).has(unit.unit_id)) {
     throw new UnitNotInPublishQueue(unit.unit_id);
   }
+  // 3. Human-review gate — fail-closed when configured, before the gateway.
+  enforceReviewGate(unit, paths);
 
   const slug = slugForUnit(unit);
   const call: ConnectorCall = {
@@ -380,6 +404,10 @@ export async function publishTranslatedPage(
   if (!unitIdsIn(paths.publishPath).has(unit.unit_id)) {
     throw new UnitNotInPublishQueue(unit.unit_id);
   }
+  // 1b. Human-review gate on the SOURCE unit — the English exposition the
+  //     translation derives from is what the human reviewed. Fail-closed,
+  //     before any translation API call or the gateway.
+  enforceReviewGate(unit, paths);
 
   // 2. Back-translation quality gate — fail closed into translation quarantine.
   const check = backTranslationCheck(translator, unit.body, lang);
