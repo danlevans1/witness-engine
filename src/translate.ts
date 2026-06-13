@@ -9,9 +9,11 @@
  * The model sits behind the `Translator` interface, mirroring Step 1's
  * LlmClient/StubLlm seam. `StubTranslator` is a deterministic, reversible
  * stand-in so the back-translation round-trip can be exercised both ways with
- * no network calls. A real Claude-API translator would implement the same
- * interface later — do NOT call any network API in v0.1.
+ * no network calls — it remains the default for tests. `ClaudeTranslator` is
+ * the real, Claude-API-backed implementation of the SAME interface, swappable
+ * in without touching the gate or the publish path.
  */
+import { execFileSync } from "node:child_process";
 
 export type Tier1Lang = "es" | "fr" | "pt";
 
@@ -122,4 +124,121 @@ export function backTranslationCheck(
   const back = translator.translate(target, toLang, "en");
   const score = similarity(source, back);
   return { target, back, score, threshold: QUALITY_THRESHOLD, pass: score >= QUALITY_THRESHOLD };
+}
+
+// --- Real translator: Claude Messages API -----------------------------------
+// Scope discipline: this is for canon-derived content only (public-domain WEB
+// scripture). It takes text in and returns translated text out — it is NOT a
+// general-purpose API surface. It implements the SAME synchronous Translator
+// contract as StubTranslator, so it drops into the gate and publish path with
+// no other changes.
+
+export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
+const CLAUDE_MODEL = "claude-sonnet-4-6";
+const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION = "2023-06-01";
+
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: "English",
+  es: "Spanish",
+  fr: "French",
+  pt: "Portuguese",
+};
+function languageName(code: string): string {
+  return LANGUAGE_NAMES[code] ?? code;
+}
+
+export interface ClaudeTranslatorOptions {
+  model?: string;
+  maxTokens?: number;
+}
+
+export class ClaudeTranslator implements Translator {
+  readonly #model: string;
+  readonly #maxTokens: number;
+
+  constructor(opts: ClaudeTranslatorOptions = {}) {
+    this.#model = opts.model ?? CLAUDE_MODEL;
+    this.#maxTokens = opts.maxTokens ?? 4096;
+  }
+
+  translate(text: string, fromLang: string, toLang: string): string {
+    const apiKey = process.env[ANTHROPIC_API_KEY_ENV];
+    if (apiKey === undefined || apiKey.trim() === "") {
+      throw new Error(
+        `ClaudeTranslator: missing ${ANTHROPIC_API_KEY_ENV}. Set the API key in the ` +
+          `environment (it is never hard-coded or logged).`,
+      );
+    }
+
+    const system =
+      `You are a faithful translator of public-domain scripture (the World English Bible). ` +
+      `Translate the user's text from ${languageName(fromLang)} to ${languageName(toLang)}. ` +
+      `Preserve meaning, verse numbers, and proper names. Return ONLY the translation — ` +
+      `no preamble, notes, quotation marks, or commentary.`;
+
+    const body = JSON.stringify({
+      model: this.#model,
+      max_tokens: this.#maxTokens,
+      system,
+      messages: [{ role: "user", content: text }],
+    });
+
+    // The Translator contract is synchronous, so the call blocks via curl.
+    // SECURITY: the API key is passed ONLY through the child's environment and
+    // referenced as $ANTHROPIC_API_KEY inside the shell — it never appears in
+    // argv, on disk, or in any log. The request body (the canon text) is piped
+    // via stdin, so it never appears in argv either.
+    let raw: string;
+    try {
+      raw = execFileSync(
+        "sh",
+        [
+          "-c",
+          `exec curl -sS -X POST ${ANTHROPIC_MESSAGES_URL} ` +
+            `-H "x-api-key: $${ANTHROPIC_API_KEY_ENV}" ` +
+            `-H "anthropic-version: ${ANTHROPIC_VERSION}" ` +
+            `-H "content-type: application/json" ` +
+            `--data-binary @-`,
+        ],
+        { input: body, encoding: "utf8", env: process.env, maxBuffer: 32 * 1024 * 1024 },
+      );
+    } catch (e) {
+      // curl's error text never contains the key (it lives only in the env).
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`ClaudeTranslator: Anthropic API request failed: ${msg}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("ClaudeTranslator: could not parse Anthropic API response");
+    }
+    const out = extractTranslation(parsed);
+    if (out.trim() === "") {
+      throw new Error("ClaudeTranslator: Anthropic API returned an empty translation");
+    }
+    return out;
+  }
+}
+
+function extractTranslation(parsed: unknown): string {
+  const obj = parsed as {
+    content?: Array<{ type?: string; text?: string }>;
+    error?: { type?: string; message?: string };
+  };
+  if (obj.error) {
+    throw new Error(
+      `ClaudeTranslator: Anthropic API error: ${obj.error.message ?? obj.error.type ?? "unknown"}`,
+    );
+  }
+  if (!Array.isArray(obj.content)) {
+    throw new Error("ClaudeTranslator: unexpected Anthropic API response shape");
+  }
+  return obj.content
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text as string)
+    .join("")
+    .trim();
 }

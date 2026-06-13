@@ -9,7 +9,7 @@
   },
   "scripts": {
     "seed": "node scripts/seed-canon.ts",
-    "test": "node --test test/witness.test.ts test/publish.test.ts test/translate.test.ts test/ledger.test.ts"
+    "test": "node --test test/witness.test.ts test/publish.test.ts test/translate.test.ts test/ledger.test.ts test/claude-translate.test.ts"
   },
   "dependencies": {
     "pfc-connector-gateway-proof": "git+https://github.com/danlevans1/pfc-connector-gateway-proof.git#v0.3.0"
